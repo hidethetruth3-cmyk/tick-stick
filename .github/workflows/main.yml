@@ -1,0 +1,121 @@
+name: build
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: write mod files
+        run: |
+          mkdir -p src/main/java/com/tickstickmod src/main/resources
+          cat > src/main/java/com/tickstickmod/TickStickMod.java <<'EOF_FILE'
+          package com.tickstickmod;
+
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.concurrent.ThreadLocalRandom;
+
+          import net.fabricmc.api.ModInitializer;
+          import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+          import net.fabricmc.fabric.api.event.player.UseItemCallback;
+          import net.minecraft.commands.Commands;
+          import net.minecraft.core.component.DataComponents;
+          import net.minecraft.network.chat.Component;
+          import net.minecraft.server.level.ServerPlayer;
+          import net.minecraft.world.InteractionResult;
+          import net.minecraft.world.item.ItemStack;
+          import net.minecraft.world.item.Items;
+
+          public class TickStickMod implements ModInitializer {
+              @Override
+              public void onInitialize() {
+                  CommandRegistrationCallback.EVENT.register((d, r, e) -> d.register(Commands.literal("tickstick").executes(c -> {
+                      ServerPlayer p = c.getSource().getPlayerOrException();
+                      ItemStack stick = new ItemStack(Items.CARROT_ON_A_STICK);
+                      stick.set(DataComponents.CUSTOM_NAME, Component.literal("Tick Stick"));
+                      if (!p.getInventory().add(stick)) p.drop(stick, false);
+                      return 1;
+                  })));
+
+                  UseItemCallback.EVENT.register((player, level, hand) -> {
+                      ItemStack stack = player.getItemInHand(hand);
+                      if (!stack.is(Items.CARROT_ON_A_STICK)) return InteractionResult.PASS;
+                      if (!stack.getHoverName().getString().startsWith("Tick Stick")) return InteractionResult.PASS;
+                      if (level.isClientSide()) return InteractionResult.PASS;
+                      if (!(player instanceof ServerPlayer holder)) return InteractionResult.PASS;
+                      var server = level.getServer();
+                      if (server == null) return InteractionResult.PASS;
+
+                      if (stack.getDamageValue() > 0) {
+                          holder.displayClientMessage(Component.literal("Tick Stick is used up - get a new one with /tickstick"), true);
+                          return InteractionResult.FAIL;
+                      }
+
+                      List<ServerPlayer> others = new ArrayList<>(server.getPlayerList().getPlayers());
+                      others.remove(holder);
+                      if (others.isEmpty()) {
+                          holder.displayClientMessage(Component.literal("No other players online"), true);
+                          return InteractionResult.FAIL;
+                      }
+
+                      ServerPlayer target = others.get(ThreadLocalRandom.current().nextInt(others.size()));
+                      server.getCommands().performPrefixedCommand(server.createCommandSourceStack(),
+                          "tp " + target.getStringUUID() + " " + holder.getStringUUID());
+
+                      stack.setDamageValue(stack.getMaxDamage() - 1);
+                      stack.set(DataComponents.CUSTOM_NAME, Component.literal("Tick Stick (used)"));
+                      holder.displayClientMessage(Component.literal("Teleported " + target.getName().getString() + " to you"), true);
+                      target.displayClientMessage(Component.literal(holder.getName().getString() + " used the Tick Stick on you"), true);
+                      return InteractionResult.SUCCESS;
+                  });
+              }
+          }
+          EOF_FILE
+          cat > src/main/resources/fabric.mod.json <<'EOF_FILE'
+          {
+            "schemaVersion": 1,
+            "id": "tickstick",
+            "version": "${version}",
+            "name": "Tick Stick",
+            "license": "MIT",
+            "environment": "*",
+            "entrypoints": { "main": ["com.tickstickmod.TickStickMod"] },
+            "depends": { "fabricloader": ">=0.18.0", "minecraft": "~1.21.11", "java": ">=21", "fabric-api": "*" }
+          }
+          EOF_FILE
+          cat > build.gradle <<'EOF_FILE'
+          plugins { id 'fabric-loom' version '1.14-SNAPSHOT' }
+          version = '1.0.0'
+          base { archivesName = 'tickstick' }
+          dependencies {
+              minecraft 'com.mojang:minecraft:1.21.11'
+              mappings loom.officialMojangMappings()
+              modImplementation 'net.fabricmc:fabric-loader:0.18.2'
+              modImplementation 'net.fabricmc.fabric-api:fabric-api:0.139.4+1.21.11'
+          }
+          processResources { filesMatching('fabric.mod.json') { expand 'version': project.version } }
+          tasks.withType(JavaCompile).configureEach { options.release = 21 }
+          EOF_FILE
+          cat > settings.gradle <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          rootProject.name = 'tickstick'
+          EOF_FILE
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.2.1
+      - run: gradle build
+      - run: unzip -l build/libs/tickstick-1.0.0.jar | grep TickStickMod
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tickstick-mod
+          path: build/libs/tickstick-1.0.0.jar
