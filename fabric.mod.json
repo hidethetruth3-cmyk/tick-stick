@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "id": "tickstick",
+  "version": "${version}",
+  "name": "Tick Stick",
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": { "main": ["com.tickstickmod.TickStickMod"] },
+  "depends": { "fabricloader": ">=0.18.0", "minecraft": "~1.21.11", "java": ">=21", "fabric-api": "*" }
+}

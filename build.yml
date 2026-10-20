@@ -1,0 +1,214 @@
+name: build
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: write mod files
+        run: |
+          mkdir -p $(dirname src/main/java/com/tickstickmod/TickStickMod.java)
+          cat > src/main/java/com/tickstickmod/TickStickMod.java <<'EOF_FILE'
+          package com.tickstickmod;
+
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.concurrent.ThreadLocalRandom;
+
+          import com.mojang.brigadier.arguments.IntegerArgumentType;
+          import net.fabricmc.api.ModInitializer;
+          import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+          import net.fabricmc.fabric.api.event.player.UseItemCallback;
+          import net.minecraft.commands.CommandSourceStack;
+          import net.minecraft.commands.Commands;
+          import net.minecraft.commands.arguments.EntityArgument;
+          import net.minecraft.core.component.DataComponents;
+          import net.minecraft.network.chat.Component;
+          import net.minecraft.server.MinecraftServer;
+          import net.minecraft.server.level.ServerPlayer;
+          import net.minecraft.world.InteractionResult;
+          import net.minecraft.world.item.ItemStack;
+          import net.minecraft.world.item.Items;
+          import net.minecraft.world.item.component.ItemLore;
+          import net.minecraft.world.phys.BlockHitResult;
+          import net.minecraft.world.phys.HitResult;
+          import net.minecraft.world.phys.Vec3;
+
+          public class TickStickMod implements ModInitializer {
+
+              @Override
+              public void onInitialize() {
+                  CommandRegistrationCallback.EVENT.register((d, r, e) -> d.register(Commands.literal("tickstick")
+                      // /tickstick  -> 1 "here" stick
+                      .executes(c -> give(c.getSource(), false, 1))
+                      .then(Commands.literal("give")
+                          // /tickstick give 8   -> 8 "here" sticks
+                          .then(Commands.argument("count", IntegerArgumentType.integer(1, 100))
+                              .executes(c -> give(c.getSource(), false, IntegerArgumentType.getInteger(c, "count"))))
+                          // /tickstick give here 8
+                          .then(Commands.literal("here")
+                              .executes(c -> give(c.getSource(), false, 1))
+                              .then(Commands.argument("count", IntegerArgumentType.integer(1, 100))
+                                  .executes(c -> give(c.getSource(), false, IntegerArgumentType.getInteger(c, "count")))))
+                          // /tickstick give aim 30
+                          .then(Commands.literal("aim")
+                              .executes(c -> give(c.getSource(), true, 1))
+                              .then(Commands.argument("count", IntegerArgumentType.integer(1, 100))
+                                  .executes(c -> give(c.getSource(), true, IntegerArgumentType.getInteger(c, "count"))))))
+                      // /tickstick tp <player>  -> teleport that player with the stick you hold (counts as used on it)
+                      .then(Commands.literal("tp")
+                          .then(Commands.argument("player", EntityArgument.player())
+                              .executes(c -> tpCommand(c.getSource(), EntityArgument.getPlayer(c, "player")))))));
+
+                  // right-click: teleports a random OTHER player. Each person only once per stick.
+                  UseItemCallback.EVENT.register((player, level, hand) -> {
+                      ItemStack stack = player.getItemInHand(hand);
+                      if (!isStick(stack)) return InteractionResult.PASS;
+                      if (level.isClientSide()) return InteractionResult.PASS;
+                      if (!(player instanceof ServerPlayer holder)) return InteractionResult.PASS;
+                      MinecraftServer server = level.getServer();
+                      if (server == null) return InteractionResult.PASS;
+
+                      List<ServerPlayer> candidates = new ArrayList<>();
+                      for (ServerPlayer sp : server.getPlayerList().getPlayers()) {
+                          if (sp != holder && !used(stack, sp)) candidates.add(sp);
+                      }
+                      if (candidates.isEmpty()) {
+                          holder.displayClientMessage(Component.literal("Nobody left for this stick - get a new one with /tickstick give"), true);
+                          return InteractionResult.FAIL;
+                      }
+
+                      ServerPlayer target = candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
+                      if (!teleport(server, holder, target, isAim(stack))) return InteractionResult.FAIL;
+                      mark(stack, target);
+                      holder.displayClientMessage(Component.literal("Teleported " + target.getName().getString()), true);
+                      target.displayClientMessage(Component.literal(holder.getName().getString() + " used the Tick Stick on you"), true);
+                      return InteractionResult.SUCCESS;
+                  });
+              }
+
+              static boolean isStick(ItemStack s) {
+                  return s.is(Items.CARROT_ON_A_STICK) && s.getHoverName().getString().startsWith("Tick Stick");
+              }
+
+              static boolean isAim(ItemStack s) {
+                  return s.getHoverName().getString().contains("(Aim)");
+              }
+
+              static boolean used(ItemStack s, ServerPlayer p) {
+                  String line = "Teleported: " + p.getName().getString();
+                  return s.getOrDefault(DataComponents.LORE, ItemLore.EMPTY).lines().stream().anyMatch(l -> l.getString().equals(line));
+              }
+
+              static void mark(ItemStack s, ServerPlayer p) {
+                  ItemLore lore = s.getOrDefault(DataComponents.LORE, ItemLore.EMPTY);
+                  s.set(DataComponents.LORE, lore.withLineAdded(Component.literal("Teleported: " + p.getName().getString())));
+              }
+
+              static int give(CommandSourceStack src, boolean aim, int count) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+                  ServerPlayer p = src.getPlayerOrException();
+                  for (int i = 0; i < count; i++) {
+                      ItemStack stick = new ItemStack(Items.CARROT_ON_A_STICK);
+                      stick.set(DataComponents.CUSTOM_NAME, Component.literal(aim ? "Tick Stick (Aim)" : "Tick Stick (Here)"));
+                      if (!p.getInventory().add(stick)) p.drop(stick, false);
+                  }
+                  src.sendSuccess(() -> Component.literal("Gave " + count + " Tick Stick (" + (aim ? "Aim" : "Here") + ")"), false);
+                  return count;
+              }
+
+              static int tpCommand(CommandSourceStack src, ServerPlayer target) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+                  ServerPlayer holder = src.getPlayerOrException();
+                  ItemStack stack = holder.getMainHandItem();
+                  if (!isStick(stack)) stack = holder.getOffhandItem();
+                  if (!isStick(stack)) {
+                      src.sendFailure(Component.literal("Hold a Tick Stick first"));
+                      return 0;
+                  }
+                  if (target == holder) {
+                      src.sendFailure(Component.literal("Pick someone else"));
+                      return 0;
+                  }
+                  if (used(stack, target)) {
+                      src.sendFailure(Component.literal(target.getName().getString() + " was already teleported with this stick - use a new stick"));
+                      return 0;
+                  }
+                  if (!teleport(src.getServer(), holder, target, isAim(stack))) return 0;
+                  mark(stack, target);
+                  src.sendSuccess(() -> Component.literal("Teleported " + target.getName().getString()), false);
+                  target.displayClientMessage(Component.literal(holder.getName().getString() + " used the Tick Stick on you"), true);
+                  return 1;
+              }
+
+              // "here" stick: target goes where you stand. "aim" stick: target goes where your crosshair points.
+              static boolean teleport(MinecraftServer server, ServerPlayer holder, ServerPlayer target, boolean aim) {
+                  String prefix = "execute as " + target.getStringUUID() + " at " + holder.getStringUUID() + " run tp @s ";
+                  String dest = "~ ~ ~";
+                  if (aim) {
+                      HitResult hit = holder.pick(128.0, 1.0f, false);
+                      if (!(hit instanceof BlockHitResult b) || hit.getType() != HitResult.Type.BLOCK) {
+                          holder.displayClientMessage(Component.literal("Aim at a block"), true);
+                          return false;
+                      }
+                      Vec3 l = b.getLocation();
+                      double x = l.x + b.getDirection().getStepX() * 0.6;
+                      double y = l.y + b.getDirection().getStepY() * 0.6;
+                      double z = l.z + b.getDirection().getStepZ() * 0.6;
+                      dest = String.format(Locale.ROOT, "%.2f %.2f %.2f", x, y, z);
+                  }
+                  server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), prefix + dest);
+                  return true;
+              }
+          }
+          EOF_FILE
+          mkdir -p $(dirname src/main/resources/fabric.mod.json)
+          cat > src/main/resources/fabric.mod.json <<'EOF_FILE'
+          {
+            "schemaVersion": 1,
+            "id": "tickstick",
+            "version": "${version}",
+            "name": "Tick Stick",
+            "license": "MIT",
+            "environment": "*",
+            "entrypoints": { "main": ["com.tickstickmod.TickStickMod"] },
+            "depends": { "fabricloader": ">=0.18.0", "minecraft": "~1.21.11", "java": ">=21", "fabric-api": "*" }
+          }
+          EOF_FILE
+          mkdir -p $(dirname build.gradle)
+          cat > build.gradle <<'EOF_FILE'
+          plugins { id 'fabric-loom' version '1.14-SNAPSHOT' }
+          version = '1.0.0'
+          base { archivesName = 'tickstick' }
+          dependencies {
+              minecraft 'com.mojang:minecraft:1.21.11'
+              mappings loom.officialMojangMappings()
+              modImplementation 'net.fabricmc:fabric-loader:0.18.2'
+              modImplementation 'net.fabricmc.fabric-api:fabric-api:0.139.4+1.21.11'
+          }
+          processResources { filesMatching('fabric.mod.json') { expand 'version': project.version } }
+          tasks.withType(JavaCompile).configureEach { options.release = 21 }
+          EOF_FILE
+          mkdir -p $(dirname settings.gradle)
+          cat > settings.gradle <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          rootProject.name = 'tickstick'
+          EOF_FILE
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.2.1
+      - run: gradle build
+      - run: unzip -l build/libs/tickstick-1.0.0.jar | grep TickStickMod
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tickstick-mod
+          path: build/libs/tickstick-1.0.0.jar
